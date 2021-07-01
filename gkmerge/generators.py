@@ -1,8 +1,10 @@
 import logging
 import random
-import functools
-import numpy as np
+import math
+# import functools
+# import numpy as np
 from itertools import permutations
+from randomdict import RandomDict
 from gkmerge.network import Network
 from gkmerge.bank import Bank
 
@@ -51,7 +53,7 @@ def seed_homogenous_balance_sheets(banks, alpha, kappa):
 
 
 def complete(n, alpha, kappa):
-    banks = {}
+    banks = RandomDict()
     for _ in range(n):
         new_b = Bank()
         banks[new_b] = new_b
@@ -63,7 +65,7 @@ def complete(n, alpha, kappa):
 
 
 def circular(n, alpha, kappa):
-    banks = {}
+    banks = RandomDict()
     for _ in range(n):
         new_b = Bank()
         banks[new_b] = new_b
@@ -78,7 +80,7 @@ def circular(n, alpha, kappa):
 
 
 def erdos_renyi(n, p, alpha, kappa):
-    banks = {}
+    banks = RandomDict()
     for _ in range(n):
         new_b = Bank()
         banks[new_b] = new_b
@@ -90,12 +92,47 @@ def erdos_renyi(n, p, alpha, kappa):
     return Network(banks=banks)
 
 
+def fast_erdos_renyi(n, p, alpha, kappa):
+    """
+    V. Batagelj and Ulrik Brandes, "Efficient generation of large random networks",
+    Phys Rev E 71, (2005)
+    """
+    banks = RandomDict()
+    banks_numbered = {}
+    for i in range(n):
+        new_b = Bank()
+        banks[new_b] = new_b
+        banks_numbered[i] = new_b
+    if p >= 1:
+        raise ValueError("p must be smaller than 1! Generate complete graph instead.")
+    if p <= 0:
+        homo_cap = seed_homogenous_balance_sheets(banks, alpha, kappa)
+        return Network(banks=banks)
+    u, v, logp = 0, -1, math.log(1.0 - p)
+    while u < n:
+        logr = math.log(1.0 - random.random())
+        v = v + 1 + int(logr / logp)
+        if u == v:
+            v += 1
+        while u < n <= v:
+            v = v - n
+            u = u + 1
+            if u == v:
+                v += 1
+        if u < n: # add edge (u, v)
+            bu, bv = banks_numbered[u], banks_numbered[v]
+            bu.successors[bv] = 0
+            bv.predecessors[bu] = 0
+    homo_cap = seed_homogenous_balance_sheets(banks, alpha, kappa)
+    return Network(banks=banks)
+
+
 def from_unique_id_link_list(n, links, alpha, kappa):
     """
     Create network from list of links with unique bank ids and no gaps in ids.
     Example: [[1, 2], [3, 1]]
     """
-    banks = {}
+    banks = RandomDict()
     banks_by_id = {}
     for _ in range(n):
         new_b = Bank()

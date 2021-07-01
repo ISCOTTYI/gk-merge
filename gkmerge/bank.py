@@ -44,7 +44,10 @@ class Bank():
 
     def capital(self, temp=False):
         if temp:
-            bs = self.temp_balance_sheet # if None exception from line 43
+            if self.temp_balance_sheet is not None:
+                bs = self.temp_balance_sheet
+            else:
+                raise ValueError("temp_balance_sheet is None!")
         else:
             bs = self.balance_sheet
         assets = bs["assets_ib"] + bs["assets_e"] - bs["shock"]
@@ -126,5 +129,42 @@ class Bank():
             if not suc.is_solvent():
                 self.r_val += 1
 
-    def acquire(self):
-        raise NotImplementedError()
+    def acquire(self, acquired):
+        if self == acquired:
+            raise ValueError("Bank can not acquire itself!")
+        if not isinstance(acquired, Bank):
+            raise TypeError(f"Banks can only acquire other banks not type {type(acquired)}!")
+        # interbank assets and liabilites and predecessor and successor dicts
+        if acquired in self.successors:
+            self.balance_sheet["liabilities_ib"] -= self.successors[acquired]
+            del self.successors[acquired]
+        for b, weight in acquired.predecessors.items():
+            if b == self:
+                continue
+            if b in self.predecessors:
+                self.predecessors[b] += weight
+                b.successors[self] += weight # redirect link b -> acquired to acquiring
+            else:
+                self.predecessors[b] = weight
+                b.successors[self] = weight # redirect link b -> acquired to acquiring
+            del b.successors[acquired]
+            self.balance_sheet["assets_ib"] += weight
+        if acquired in self.predecessors:
+            self.balance_sheet["assets_ib"] -= self.predecessors[acquired]
+            del self.predecessors[acquired]
+        for b, weight in acquired.successors.items():
+            if b == self:
+                continue
+            if b in self.successors:
+                self.successors[b] += weight
+                b.predecessors[self] += weight
+            else:
+                self.successors[b] = weight
+                b.predecessors[self] = weight
+            del b.predecessors[acquired]
+            self.balance_sheet["liabilities_ib"] += weight
+        # external balance sheet quantities
+        self.balance_sheet["assets_e"] += acquired.balance_sheet["assets_e"]
+        self.balance_sheet["liabilities_e"] += acquired.balance_sheet["liabilities_e"]
+        self.balance_sheet["shock"] += acquired.balance_sheet["shock"]
+        self.balance_sheet["provision"] += acquired.balance_sheet["provision"]

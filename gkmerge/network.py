@@ -1,9 +1,11 @@
 import logging
-from collections import deque, Counter
-from itertools import islice
-from typing import OrderedDict
 import numpy as np
+from collections import deque, Counter
+from randomdict import RandomDict
+# from itertools import islice
+from typing import OrderedDict
 from gkmerge.bank import Bank
+from gkmerge.util import sample_unique_pair, sample_except, random_pairs
 
 logger = logging.getLogger(__name__)
 
@@ -14,13 +16,14 @@ logger = logging.getLogger(__name__)
 #####################
 
 class Network():
-    def __init__(self, banks=None): # banks holds bank: bank
+    def __init__(self, banks=None): # banks is dict-like and holds bank: bank
         if banks is None:
-            self.banks = {}
+            self.banks = RandomDict()
         else:
-            self.banks = banks
+            self.banks = RandomDict(banks)
         self.simultaneous_cascade_steps = None
         self.merge_round = 0
+        self._shmp_pairs = None
 
     @property
     def number_of_banks(self):
@@ -41,7 +44,6 @@ class Network():
     @property
     def links_by_id(self):
         return [(b.id_, suc.id_) for b in self.banks for suc, weight in b.successors.items()]
-
 
     @property
     def adjacency_matrix(self):
@@ -100,14 +102,32 @@ class Network():
             if suc not in self.banks:
                 continue
             del suc.predecessors[bank]
-
+    
     def remove_banks_from(self, banks, handle_links=True):
         for b in banks:
             self.remove_bank(b, handle_links=handle_links)
 
+    def add_link(self, from_bank, to_bank, weight):
+        """
+        Add or update link
+        """
+        if from_bank not in self.banks or to_bank not in self.banks:
+            raise ValueError(f"Banks in link {(from_bank.id_, to_bank.id_)} are not in network!")
+        if to_bank in from_bank.successors and from_bank in to_bank.predecessors:
+            from_bank.successors[to_bank] += weight
+            to_bank.predecessors[from_bank] += weight
+        else:
+            from_bank.successors[to_bank] = weight
+            to_bank.predecessors[from_bank] = weight
+
+    def get_largest(self):
+        # if all banks are equal size returns the first in iterator
+        return max(self.banks, key=lambda b: b.size)
+
     def shock_random(self):
         # https://stackoverflow.com/questions/32802869/selecting-a-random-value-from-dictionary-in-constant-time-in-python-3
-        b = next(islice(self.banks.keys(), np.random.randint(0, len(self.banks)), None))
+        # b = next(islice(self.banks.keys(), np.random.randint(0, len(self.banks)), None))
+        b = self.banks.random_key()
         b.aggregate_shock()
         return b
 
@@ -174,12 +194,48 @@ class Network():
                         stack.append(suc)
                         on_stack[suc] = True
 
-    def get_largest(self):
-        return max(self.banks, key=lambda b: b.size)
+    def merge(self, acquiring, acquired):
+        """
+        Merge two banks in the network. Merge is interpreted as the acquisition
+        of one bank by the other.
+        """
+        acquiring.acquire(acquired)
+        del self.banks[acquired]
+
+    def random_merge(self, rule):
+        """
+        Merge rules for random are:
+            - "random": Fully randomly select merge parties
+            - "vertical": Largest bank acquires randomly selected smaller bank
+            - "semihorizontal": Only small banks may merge
+        """
+        acquiring, acquired = self._sample_banks_for_merge(rule)
+        self.merge(acquiring, acquired)
+    
+    def _sample_banks_for_merge(self, rule):
+        """
+        Returns a tuple of banks.
+        """
+        if rule == "random":
+            return sample_unique_pair(self.banks)
+        if rule == "vertical":
+            lb = self.get_largest()
+            b = sample_except(self.banks, lb)
+            return (b, lb)
+        if rule == "semihorizontal":
+            if self._shmp_pairs is None:
+                self._shmp_pairs = random_pairs(self.banks)
+            if len(self._shmp_pairs) == 0:
+                raise ValueError("Can only perform semihorizontal if there are unmerged banks!")
+            return self._shmp_pairs.pop()            
+        raise ValueError(f"Unknown merge rule {rule}!")
 
     def defaulted_fraction(self):
         c = Counter((b.defaulted for b in self.banks))
         return c[True] / self.number_of_banks
     
     def z(self):
+        """
+        Mean in-/out-degree of the network.
+        """
         return sum((len(b.successors) for b in self.banks)) / self.number_of_banks
