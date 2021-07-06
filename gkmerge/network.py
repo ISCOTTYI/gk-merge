@@ -16,11 +16,11 @@ logger = logging.getLogger(__name__)
 #####################
 
 class Network():
-    def __init__(self, banks=None): # banks is dict-like and holds bank: bank
-        if banks is None:
-            self.banks = RandomDict()
-        else:
-            self.banks = RandomDict(banks)
+    def __init__(self, input=None): # banks is dict-like and holds bank: bank
+        self.banks = RandomDict()
+        self._pres = {} # stores {bank: {pre_of_bank: weight, ...}, ...}
+        self._sucs = {} # stores {bank: {suc_of_bank: weight, ...}, ...}
+
         self.simultaneous_cascade_steps = None
         self.merge_round = 0
         self._shmp_pairs = None
@@ -39,24 +39,24 @@ class Network():
 
     @property
     def links(self):
-        return [(b, suc) for b in self.banks for suc, weight in b.successors.items()]
+        return [(b, suc) for b in self._sucs for suc in self._sucs[b]]
     
     @property
     def links_by_id(self):
-        return [(b.id_, suc.id_) for b in self.banks for suc, weight in b.successors.items()]
+        return [(b.id_, suc.id_) for b in self._sucs for suc in self._sucs[b]]
 
     @property
     def adjacency_matrix(self):
         banks_index = OrderedDict({b: i for i, b in enumerate(self.banks)})
         matrix = []
         for b in banks_index:
-            matrix_row_i = [0] * len(banks_index)
-            for suc, weight in b.successors.items():
+            matrix_row_i = [None] * len(banks_index)
+            for suc, weight in self._sucs[b].items():
                 matrix_row_i[banks_index[suc]] = weight
             matrix.append(matrix_row_i)
         return matrix
     
-    def add_bank(self, bank, handle_links=True):
+    def add_bank(self, bank):
         """
         Add a bank to the network. If handle_links is True, add pres and sucs
         of added bank if neccessary and make sure links are correct with the
@@ -65,61 +65,116 @@ class Network():
         if not isinstance(bank, Bank):
             raise TypeError(f"Can only add Banks, not type {type(bank)}")
         if bank in self.banks:
-            logger.warning(f"Bank with id {bank.id_} is already in network!")
-
+            raise ValueError(f"Bank with id {bank.id_} is already in network!")
         self.banks[bank] = bank
-        
-        if not handle_links:
-            return
-        for pre, weight in bank.predecessors.items():
-            if pre not in self.banks:
-                self.add_bank(pre)
-            if bank not in pre.successors:
-                pre.successors[bank] = weight
-        for suc, weight in bank.successors.items():
-            if suc not in self.banks:
-                self.add_bank(suc)
-            if bank not in suc.predecessors:
-                suc.predecessors[bank] = weight
+        self._sucs[bank] = {}
+        self._pres[bank] = {}
 
-    def add_banks_from(self, banks, handle_links=True):
+    def add_banks_from(self, banks):
         for b in banks:
-            self.add_bank(b, handle_links=handle_links)
+            self.add_bank(b)
 
-    def remove_bank(self, bank, handle_links=True):
-        if not bank in self.banks:
-            raise ValueError(f"Bank with id {bank.id_} is not in network")
-        
-        del self.banks[bank]
-
-        if not handle_links:
-            return
-        for pre in bank.predecessors:
-            if pre not in self.banks:
-                continue
-            del pre.successors[bank]
-        for suc in bank.successors:
-            if suc not in self.banks:
-                continue
-            del suc.predecessors[bank]
+    def remove_bank(self, bank, update_balance_sheets=True):
+        try:
+            del self.banks[bank]
+        except KeyError:
+            raise ValueError(f"Bank with id {bank.id_} is not in network!")
+        for pre, w in self.pres_of(bank, weight=True):
+            if update_balance_sheets:
+                pre.balance_sheet["liabilities_ib"] -= w
+            del self._sucs[pre][bank]
+        del self._pres[bank]
+        for suc, w in self.sucs_of(bank, weight=True):
+            if update_balance_sheets:
+                suc.balance_sheet["assets_ib"] -= w
+            del self._pres[suc][bank]
+        del self._sucs[bank]
     
-    def remove_banks_from(self, banks, handle_links=True):
+    def remove_banks_from(self, banks):
         for b in banks:
-            self.remove_bank(b, handle_links=handle_links)
+            self.remove_bank(b)
 
-    def add_link(self, from_bank, to_bank, weight):
+    def add_or_update_link(self, u, v, weight=0, update_balance_sheets=True):
         """
-        Add or update link
+        Adds a link or updates its weight if link already in network.
+        If update_balance_sheets is True, interbank positions in balance sheets
+        will also be updated.
         """
-        if from_bank not in self.banks or to_bank not in self.banks:
-            raise ValueError(f"Banks in link {(from_bank.id_, to_bank.id_)} are not in network!")
-        if to_bank in from_bank.successors and from_bank in to_bank.predecessors:
-            from_bank.successors[to_bank] += weight
-            to_bank.predecessors[from_bank] += weight
-        else:
-            from_bank.successors[to_bank] = weight
-            to_bank.predecessors[from_bank] = weight
+        if u == v:
+            raise ValueError("Selfloops are not supported!")
+        try:
+            u_sucs = self._sucs[u] # KeyError if banks not in the network
+            v_pres = self._pres[v]
+            if update_balance_sheets:
+                curr_weight = 0
+                if v in self._sucs[u]:
+                    curr_weight = self._sucs[u][v]
+                u.balance_sheet["liabilities_ib"] += weight - curr_weight
+                v.balance_sheet["assets_ib"] += weight - curr_weight
+            u_sucs[v] = weight
+            v_pres[u] = weight
+        except KeyError:
+            raise ValueError(f"Bank(s) from link ({u.id_}, {v.id_}) not in network!")
+    
+    add_link = add_or_update_link
+    
+    def remove_link(self, u, v, update_balance_sheets=True):
+        try:
+            if update_balance_sheets:
+                weight = self._sucs[u][v]
+                u.balance_sheet["liabilities_ib"] -= weight
+                v.balance_sheet["assets_ib"] -= weight
+            del self._sucs[u][v]
+            del self._pres[v][u]
+        except KeyError:
+            raise ValueError(f"Link ({u.id_}, {v.id_}) is not in network!")
+    
+    def get_link_weight(self, u, v):
+        try:
+            return self._sucs[u][v]
+        except KeyError:
+            raise ValueError(f"Link ({u.id_}, {v.id_}) is not in network!")
 
+    def sucs_of(self, bank, weight=False):
+        try:
+            if weight:
+                return self._sucs[bank].items()
+            return self._sucs[bank].keys()
+        except KeyError:
+            raise ValueError(f"Bank with id {bank.id_} is not in network!")
+    
+    def pres_of(self, bank, weight=False):
+        try:
+            if weight:
+                return self._pres[bank].items()
+            return self._pres[bank].keys()
+        except KeyError:
+            raise ValueError(f"Bank with id {bank.id_} is not in network!")
+        
+    def is_suc(self, bank, suc):
+        try:
+            return (suc in self._sucs[bank])
+        except KeyError:
+            raise ValueError(f"Bank with id {bank.id_} is not in network!")
+    
+    def is_pre(self, bank, pre):
+        try:
+            return (pre in self._pres[bank])
+        except KeyError:
+            raise ValueError(f"Bank with id {bank.id_} is not in network!")
+    
+    def out_deg_of(self, bank):
+        try:
+            return len(self._sucs[bank])
+        except KeyError:
+            raise ValueError(f"Bank with id {bank.id_} is not in network!")
+        
+    def in_deg_of(self, bank):
+        try:
+            return len(self._pres[bank])
+        except KeyError:
+            raise ValueError(f"Bank with id {bank.id_} is not in network!")
+    
     def get_largest(self):
         # if all banks are equal size returns the first in iterator
         return max(self.banks, key=lambda b: b.size)
@@ -163,9 +218,12 @@ class Network():
         while(something_changed):
             something_changed = False
             for b in self.banks:
-                # NOTE: if order of statements in "or" is changed, update_state will not evaluate
-                # once something_changed is True
-                something_changed = b.update_state(mode="simultaneous") or something_changed
+                # NOTE: if order of statements in "or" is changed, update_state
+                # will not evaluate once something_changed is True
+                something_changed = (
+                    b.update_state(self.sucs_of(b, weight=True), mode="simultaneous") or 
+                    something_changed
+                )
             if something_changed:
                 for b in self.banks:
                     if b.temp_defaulted is not None:
@@ -188,8 +246,8 @@ class Network():
         while(stack):
             b = stack.pop()
             on_stack[b] = False
-            if b.update_state(mode="sequential"):
-                for suc in b.successors:
+            if b.update_state(self.sucs_of(b, weight=True), mode="sequential"):
+                for suc in self.sucs_of(b):
                     if not suc.defaulted and not on_stack[suc]:
                         stack.append(suc)
                         on_stack[suc] = True
@@ -199,8 +257,30 @@ class Network():
         Merge two banks in the network. Merge is interpreted as the acquisition
         of one bank by the other.
         """
-        acquiring.acquire(acquired)
-        del self.banks[acquired]
+        if acquiring == acquired:
+            raise ValueError("Bank can not acquire itself!")
+        # external balance sheet quantities are simply added
+        ing_bs, ed_bs = acquiring.balance_sheet, acquired.balance_sheet
+        ing_bs["assets_e"] += ed_bs["assets_e"]
+        ing_bs["liabilities_e"] += ed_bs["liabilities_e"]
+        ing_bs["shock"] += ed_bs["shock"]
+        ing_bs["provision"] += ed_bs["provision"]
+        # handle interbank links
+        for suc, w in self.sucs_of(acquired, weight=True):
+            if suc == acquiring: # TODO: maybe use try catch instead as add_link checks for selfloops
+                continue
+            new_w = w
+            if self.is_suc(acquiring, suc):
+                new_w += self.get_link_weight(acquiring, suc)
+            self.add_or_update_link(acquiring, suc, weight=new_w)
+        for pre, w in self.pres_of(acquired, weight=True):
+            if pre == acquiring:
+                continue
+            new_w = w
+            if self.is_pre(acquiring, pre):
+                new_w += self.get_link_weight(pre, acquiring)
+            self.add_or_update_link(pre, acquiring, weight=new_w)
+        self.remove_bank(acquired)
 
     def random_merge(self, rule):
         """
@@ -217,17 +297,19 @@ class Network():
         Returns a tuple of banks.
         """
         if rule == "random":
-            return sample_unique_pair(self.banks)
+            b, d = sample_unique_pair(self.banks)
+            return b, d
         if rule == "vertical":
             lb = self.get_largest()
             b = sample_except(self.banks, lb)
-            return (b, lb)
+            return lb, b # when passed to merge lb is acquiring
         if rule == "semihorizontal":
             if self._shmp_pairs is None:
                 self._shmp_pairs = random_pairs(self.banks)
             if len(self._shmp_pairs) == 0:
                 raise ValueError("Can only perform semihorizontal if there are unmerged banks!")
-            return self._shmp_pairs.pop()            
+            b, d = self._shmp_pairs.pop()
+            return b, d            
         raise ValueError(f"Unknown merge rule {rule}!")
 
     def defaulted_fraction(self):
@@ -238,4 +320,7 @@ class Network():
         """
         Mean in-/out-degree of the network.
         """
-        return sum((len(b.successors) for b in self.banks)) / self.number_of_banks
+        return sum((self.out_deg_of(b) for b in self.banks)) / self.number_of_banks
+    
+    # def __str__(self) -> str:
+    #     pass

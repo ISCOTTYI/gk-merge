@@ -11,12 +11,16 @@ from gkmerge.bank import Bank
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "unlinked",
     "complete",
-    "circular"
+    "circular",
+    "erdos_renyi",
+    "fast_erdos_renyi",
+    "from_unique_id_link_list"
 ]
 
 
-def seed_homogenous_balance_sheets(banks, alpha, kappa):
+def seed_homogenous_balance_sheets(network, alpha, kappa):
     """
     For a given list of banks, initialize the balance sheets. Assets are
     distributed evenly over incoming links.
@@ -28,68 +32,67 @@ def seed_homogenous_balance_sheets(banks, alpha, kappa):
     """
     if not 0 <= alpha <= 1 or not 0 <= alpha <= 1:
         raise ValueError("alpha and kappa must be between 0 and 1")
-
     assets_tot = 100
-    homogenous_capital = assets_tot * kappa
-
-    for b in banks:
-        if len(b.predecessors) > 0:
+    homog_cap = assets_tot * kappa
+    net = network
+    for b in net.banks:
+        in_deg = net.in_deg_of(b)
+        if in_deg > 0:
             assets_ib = assets_tot * alpha
-            assets_ib_per_pre = assets_ib / len(b.predecessors)
+            assets_ib_per_pre = assets_ib / in_deg
             b.balance_sheet["assets_ib"] = assets_ib
             b.balance_sheet["assets_e"] = assets_tot - assets_ib
         else:
             assets_ib_per_pre = 0
             b.balance_sheet["assets_ib"] = 0
             b.balance_sheet["assets_e"] = assets_tot
-        for pre in b.predecessors:
-            b.predecessors[pre] = assets_ib_per_pre
-            pre.successors[b] = assets_ib_per_pre
-    for b in banks:
-        liabilities_ib = sum(b.successors.values())
+        for pre in net.pres_of(b):
+            net.add_or_update_link(pre, b, weight=assets_ib_per_pre, update_balance_sheets=False)
+    for b in net.banks:
+        liabilities_ib = sum([suc_weight[1] for suc_weight in net.sucs_of(b, weight=True)])
         b.balance_sheet["liabilities_ib"] = liabilities_ib
-        b.balance_sheet["liabilities_e"] = assets_tot - liabilities_ib - homogenous_capital
-    return homogenous_capital
+        b.balance_sheet["liabilities_e"] = assets_tot - liabilities_ib - homog_cap
+    return homog_cap
+
+
+def unlinked(n):
+    """
+    Create network with given number n of banks
+    """
+    net = Network()
+    for _ in range(n):
+        b = Bank()
+        net.add_bank(b)
+    return net
 
 
 def complete(n, alpha, kappa):
-    banks = RandomDict()
-    for _ in range(n):
-        new_b = Bank()
-        banks[new_b] = new_b
-    for u, v in permutations(banks, 2):
-        u.successors[v] = 0
-        v.predecessors[u] = 0
-    homo_cap = seed_homogenous_balance_sheets(banks, alpha, kappa)
-    return Network(banks=banks)
+    net = unlinked(n)
+    for u, v in permutations(net.banks, 2):
+        # balance_sheets all 0 and weights all 0 too -> no need to update balance_sheets
+        net.add_or_update_link(u, v, update_balance_sheets=False)
+    homo_cap = seed_homogenous_balance_sheets(net, alpha, kappa)
+    return net
 
 
 def circular(n, alpha, kappa):
-    banks = RandomDict()
-    for _ in range(n):
-        new_b = Bank()
-        banks[new_b] = new_b
-    banks_lst = list(banks)
+    net = unlinked(n)
+    banks_lst = list(net.banks)
     for i in range(n):
         u = banks_lst[i]
         v = banks_lst[(i + 1) % n]
-        u.successors[v] = 0
-        v.predecessors[u] = 0
-    homo_cap = seed_homogenous_balance_sheets(banks, alpha, kappa)
-    return Network(banks=banks)
+        net.add_or_update_link(u, v, update_balance_sheets=False)
+    homo_cap = seed_homogenous_balance_sheets(net, alpha, kappa)
+    return net
 
 
 def erdos_renyi(n, p, alpha, kappa):
-    banks = RandomDict()
-    for _ in range(n):
-        new_b = Bank()
-        banks[new_b] = new_b
-    for u, v in permutations(banks, 2):
+    net = unlinked(n)
+    for u, v in permutations(net.banks, 2):
         if random.random() < p:
-            u.successors[v] = 0
-            v.predecessors[u] = 0
-    homo_cap = seed_homogenous_balance_sheets(banks, alpha, kappa)
-    return Network(banks=banks)
+            net.add_or_update_link(u, v, update_balance_sheets=False)
+    homo_cap = seed_homogenous_balance_sheets(net, alpha, kappa)
+    return net
 
 
 def fast_erdos_renyi(n, p, alpha, kappa):
@@ -97,17 +100,17 @@ def fast_erdos_renyi(n, p, alpha, kappa):
     V. Batagelj and Ulrik Brandes, "Efficient generation of large random networks",
     Phys Rev E 71, (2005)
     """
-    banks = RandomDict()
+    net = Network()
     banks_numbered = {}
     for i in range(n):
-        new_b = Bank()
-        banks[new_b] = new_b
-        banks_numbered[i] = new_b
+        b = Bank()
+        net.add_bank(b)
+        banks_numbered[i] = b
     if p >= 1:
         raise ValueError("p must be smaller than 1! Generate complete graph instead.")
     if p <= 0:
-        homo_cap = seed_homogenous_balance_sheets(banks, alpha, kappa)
-        return Network(banks=banks)
+        homo_cap = seed_homogenous_balance_sheets(net, alpha, kappa)
+        return net
     u, v, logp = 0, -1, math.log(1.0 - p)
     while u < n:
         logr = math.log(1.0 - random.random())
@@ -121,10 +124,9 @@ def fast_erdos_renyi(n, p, alpha, kappa):
                 v += 1
         if u < n: # add edge (u, v)
             bu, bv = banks_numbered[u], banks_numbered[v]
-            bu.successors[bv] = 0
-            bv.predecessors[bu] = 0
-    homo_cap = seed_homogenous_balance_sheets(banks, alpha, kappa)
-    return Network(banks=banks)
+            net.add_or_update_link(bu, bv, update_balance_sheets=False)
+    homo_cap = seed_homogenous_balance_sheets(net, alpha, kappa)
+    return net
 
 
 def from_unique_id_link_list(n, links, alpha, kappa):
@@ -132,19 +134,18 @@ def from_unique_id_link_list(n, links, alpha, kappa):
     Create network from list of links with unique bank ids and no gaps in ids.
     Example: [[1, 2], [3, 1]]
     """
-    banks = RandomDict()
+    net = Network()
     banks_by_id = {}
     for _ in range(n):
-        new_b = Bank()
-        banks[new_b] = new_b
-        banks_by_id[new_b.id_] = new_b
+        b = Bank()
+        net.add_bank(b)
+        banks_by_id[b.id_] = b
     for link in links:
         u = banks_by_id[link[0]]
         v = banks_by_id[link[1]]
-        u.successors[v] = 0
-        v.predecessors[u] = 0
-    homo_cap = seed_homogenous_balance_sheets(banks, alpha, kappa)
-    return Network(banks=banks)
+        net.add_or_update_link(u, v, update_balance_sheets=False)
+    homo_cap = seed_homogenous_balance_sheets(net, alpha, kappa)
+    return net
 
 
 def from_adjacency_matrix(ad_mat):

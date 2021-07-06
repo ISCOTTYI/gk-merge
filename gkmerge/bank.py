@@ -17,8 +17,6 @@ class Bank():
 
         self.defaulted = False
         self.temp_defaulted = None
-        self.r_val = 0 # number of banks infected by self
-
         self.balance_sheet = dict(
             assets_ib=0,
             assets_e=0,
@@ -27,20 +25,9 @@ class Bank():
             provision=0, # used to compensate capital increase
             shock=0
         )
-
         self.temp_balance_sheet = None
-        self.predecessors = dict() # holds [predecessor bank]: [link weight]
-        self.successors = dict() # holds [successor bank]: [link weight]
-
+        self.r_val = 0 # number of banks infected by self
         self.size = 0.0
-
-    @property
-    def predecessors_by_id(self):
-        return {pre.id_: w for pre, w in self.predecessors.items()}
-
-    @property
-    def successors_by_id(self):
-        return {suc.id_: w for suc, w in self.successors.items()}
 
     def capital(self, temp=False):
         if temp:
@@ -70,7 +57,7 @@ class Bank():
     def aggregate_shock(self):
         self.balance_sheet["shock"] = self.balance_sheet["assets_e"]
 
-    def update_state(self, mode="simultaneous"):
+    def update_state(self, sucs_weighted, mode="simultaneous"):
         """
         Update banks state if required and propagate corresponding shock to successors.
         """
@@ -80,24 +67,23 @@ class Bank():
         if self.is_solvent():
             # no state update required
             return False
-
         # bank insolvent, update it and its successors
         if mode == "simultaneous":
-            self._simultaneous_update()
+            self._simultaneous_update(sucs_weighted)
         elif mode == "sequential":
-            self._sequential_update()
+            self._sequential_update(sucs_weighted)
         else:
             raise ValueError(f"Update mode '{mode}' is unknown!")
         return True
 
-    def _simultaneous_update(self):
+    def _simultaneous_update(self, sucs_weighted):
         """
         Update insolvent bank in simultaneous update mode.
         Banks get updated in waves, therefore we set temp_states first and
         then simultaneously update the whole network with tempstates
         """
         self.temp_defaulted = True
-        for suc, lend in self.successors.items():
+        for suc, lend in sucs_weighted:
             # if bank was insolvent previous to this update round or was already
             # shocked to default in this round (has insolvent temp_bs) we skip
             temp_bs_set = bool(suc.temp_balance_sheet is not None)
@@ -109,62 +95,29 @@ class Bank():
             # init temp_balance sheet if not yet set
             if not temp_bs_set:
                 suc.temp_balance_sheet = dict(suc.balance_sheet)
-            suc.temp_balance_sheet["shock"] += lend
+            suc.temp_balance_sheet["shock"] += lend # transmit shock
             if not suc.is_solvent(temp=True):
                 # r_val changed if self responsible for default of suc
                 self.r_val += 1
 
-    def _sequential_update(self):
+    def _sequential_update(self, sucs_weighted):
         """
         Update insolvent bank in sequential update mode.
         Directly set state and balance sheet. Banks are updated in arbitrary order
         """
         self.defaulted = True
-        for suc, lend in self.successors.items():
+        for suc, lend in sucs_weighted:
             if not suc.is_solvent():
                 continue
-
             suc.balance_sheet["shock"] += lend
-
             if not suc.is_solvent():
                 self.r_val += 1
+    
+    # def __eq__(self, o: object) -> bool:
+    #     pass
 
-    def acquire(self, acquired):
-        if self == acquired:
-            raise ValueError("Bank can not acquire itself!")
-        if not isinstance(acquired, Bank):
-            raise TypeError(f"Banks can only acquire other banks not type {type(acquired)}!")
-        # interbank assets and liabilites and predecessor and successor dicts
-        if acquired in self.successors:
-            self.balance_sheet["liabilities_ib"] -= self.successors[acquired]
-            del self.successors[acquired]
-        for b, weight in acquired.predecessors.items():
-            if b == self:
-                continue
-            if b in self.predecessors:
-                self.predecessors[b] += weight
-                b.successors[self] += weight # redirect link b -> acquired to acquiring
-            else:
-                self.predecessors[b] = weight
-                b.successors[self] = weight # redirect link b -> acquired to acquiring
-            del b.successors[acquired]
-            self.balance_sheet["assets_ib"] += weight
-        if acquired in self.predecessors:
-            self.balance_sheet["assets_ib"] -= self.predecessors[acquired]
-            del self.predecessors[acquired]
-        for b, weight in acquired.successors.items():
-            if b == self:
-                continue
-            if b in self.successors:
-                self.successors[b] += weight
-                b.predecessors[self] += weight
-            else:
-                self.successors[b] = weight
-                b.predecessors[self] = weight
-            del b.predecessors[acquired]
-            self.balance_sheet["liabilities_ib"] += weight
-        # external balance sheet quantities
-        self.balance_sheet["assets_e"] += acquired.balance_sheet["assets_e"]
-        self.balance_sheet["liabilities_e"] += acquired.balance_sheet["liabilities_e"]
-        self.balance_sheet["shock"] += acquired.balance_sheet["shock"]
-        self.balance_sheet["provision"] += acquired.balance_sheet["provision"]
+    # def __hash__(self) -> int:
+    #     pass
+
+    # def __str__(self) -> str:
+    #     pass
