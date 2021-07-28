@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 class Network():
     def __init__(self, input=None): # banks is dict-like and holds bank: bank
         self.banks = RandomDict()
+        self.number_of_links = 0
         self._pres = {} # stores {bank: {pre_of_bank: weight, ...}, ...}
         self._sucs = {} # stores {bank: {suc_of_bank: weight, ...}, ...}
 
@@ -111,6 +112,8 @@ class Network():
                     curr_weight = self._sucs[u][v]
                 u.balance_sheet["liabilities_ib"] += weight - curr_weight
                 v.balance_sheet["assets_ib"] += weight - curr_weight
+            if not v in u_sucs: # link already in network
+                self.number_of_links += 1
             u_sucs[v] = weight
             v_pres[u] = weight
         except KeyError:
@@ -178,6 +181,18 @@ class Network():
     def get_largest(self):
         # if all banks are equal size returns the first in iterator
         return max(self.banks, key=lambda b: b.size)
+    
+    def get_highest_in_deg(self):
+        return max(self.banks, key=lambda b: self.in_deg_of(b))
+
+    def get_highest_out_deg(self):
+        return max(self.banks, key=lambda b: self.out_deg_of(b))
+    
+    def get_kth_highest_in_deg(self, k):
+        return sorted(list(self.banks), key=lambda b: self.in_deg_of(b))[-k]
+    
+    def get_kth_highest_out_deg(self, k):
+        return sorted(list(self.banks), key=lambda b: self.out_deg_of(b))[-k]
 
     def shock_random(self):
         # https://stackoverflow.com/questions/32802869/selecting-a-random-value-from-dictionary-in-constant-time-in-python-3
@@ -251,6 +266,14 @@ class Network():
                     if not suc.defaulted and not on_stack[suc]:
                         stack.append(suc)
                         on_stack[suc] = True
+    
+    def reset_cascade(self):
+        for b in self.banks:
+            b.defaulted = False
+            b.reset_temps()
+            b.r_val = 0
+            b.balance_sheet["shock"] = 0
+        self.simultaneous_cascade_steps = 0
 
     def merge(self, acquiring, acquired):
         """
@@ -267,7 +290,8 @@ class Network():
         ing_bs["provision"] += ed_bs["provision"]
         # handle interbank links
         for suc, w in self.sucs_of(acquired, weight=True):
-            if suc == acquiring: # TODO: maybe use try catch instead as add_link checks for selfloops
+            # TODO: maybe use try catch instead as add_link checks for selfloops
+            if suc == acquiring:
                 continue
             new_w = w
             if self.is_suc(acquiring, suc):
@@ -281,6 +305,7 @@ class Network():
                 new_w += self.get_link_weight(pre, acquiring)
             self.add_or_update_link(pre, acquiring, weight=new_w)
         self.remove_bank(acquired)
+        self.merge_round += 1
 
     def random_merge(self, rule):
         """
@@ -321,6 +346,16 @@ class Network():
         Mean in-/out-degree of the network.
         """
         return sum((self.out_deg_of(b) for b in self.banks)) / self.number_of_banks
+    
+    def in_deg_distr(self):
+        in_deg_gen = (self.in_deg_of(b) for b in self.banks)
+        c = Counter(in_deg_gen)
+        return list(c.keys()), list(c.values())
+    
+    def out_deg_distr(self):
+        out_deg_gen = (self.out_deg_of(b) for b in self.banks)
+        c = Counter(out_deg_gen)
+        return list(c.keys()), list(c.values())
     
     # def __str__(self) -> str:
     #     pass

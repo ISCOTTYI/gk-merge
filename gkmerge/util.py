@@ -52,3 +52,14 @@ def insert_dict(insert_to, insert_from):
             insert_to[k] += v
         else:
             insert_to[k] = v
+
+
+def random_subset(seq, n):
+    """
+    Return n unique elements from seq.
+    """
+    res = set()
+    while len(res) < n:
+        x = random.choice(seq)
+        res.add(x)
+    return res

@@ -1,12 +1,13 @@
 import logging
 import random
 import math
+import numpy as np
 # import functools
-# import numpy as np
 from itertools import permutations
 from randomdict import RandomDict
 from gkmerge.network import Network
 from gkmerge.bank import Bank
+from gkmerge.util import random_subset
 
 logger = logging.getLogger(__name__)
 
@@ -23,14 +24,10 @@ __all__ = [
 def seed_homogenous_balance_sheets(network, alpha, kappa):
     """
     For a given list of banks, initialize the balance sheets. Assets are
-    distributed evenly over incoming links.
-
-    :param alpha: fraction of interbank assets of total assets, 0 < alpha < 1
-    :type alpha: float
-    :param kappa: fraction of capital of total assets, 0 < kappa < 1
-    :type kappa: float
+    distributed evenly over incoming links. alpha is fraction of interbank assets
+    on total assets, kappa is fraction of capital
     """
-    if not 0 <= alpha <= 1 or not 0 <= alpha <= 1:
+    if not 0 <= alpha <= 1 or not 0 <= kappa <= 1:
         raise ValueError("alpha and kappa must be between 0 and 1")
     assets_tot = 100
     homog_cap = assets_tot * kappa
@@ -66,36 +63,39 @@ def unlinked(n):
     return net
 
 
-def complete(n, alpha, kappa):
+def complete(n, alpha=0, kappa=0):
     net = unlinked(n)
     for u, v in permutations(net.banks, 2):
         # balance_sheets all 0 and weights all 0 too -> no need to update balance_sheets
         net.add_or_update_link(u, v, update_balance_sheets=False)
-    homo_cap = seed_homogenous_balance_sheets(net, alpha, kappa)
+    if alpha > 0 or kappa > 0:
+        homo_cap = seed_homogenous_balance_sheets(net, alpha, kappa)
     return net
 
 
-def circular(n, alpha, kappa):
+def circular(n, alpha=0, kappa=0):
     net = unlinked(n)
     banks_lst = list(net.banks)
     for i in range(n):
         u = banks_lst[i]
         v = banks_lst[(i + 1) % n]
         net.add_or_update_link(u, v, update_balance_sheets=False)
-    homo_cap = seed_homogenous_balance_sheets(net, alpha, kappa)
+    if alpha > 0 or kappa > 0:
+        homo_cap = seed_homogenous_balance_sheets(net, alpha, kappa)
     return net
 
 
-def erdos_renyi(n, p, alpha, kappa):
+def erdos_renyi(n, p, alpha=0, kappa=0):
     net = unlinked(n)
     for u, v in permutations(net.banks, 2):
         if random.random() < p:
             net.add_or_update_link(u, v, update_balance_sheets=False)
-    homo_cap = seed_homogenous_balance_sheets(net, alpha, kappa)
+    if alpha > 0 or kappa > 0:
+        homo_cap = seed_homogenous_balance_sheets(net, alpha, kappa)
     return net
 
 
-def fast_erdos_renyi(n, p, alpha, kappa):
+def fast_erdos_renyi(n, p, alpha=0, kappa=0):
     """
     V. Batagelj and Ulrik Brandes, "Efficient generation of large random networks",
     Phys Rev E 71, (2005)
@@ -125,7 +125,123 @@ def fast_erdos_renyi(n, p, alpha, kappa):
         if u < n: # add edge (u, v)
             bu, bv = banks_numbered[u], banks_numbered[v]
             net.add_or_update_link(bu, bv, update_balance_sheets=False)
-    homo_cap = seed_homogenous_balance_sheets(net, alpha, kappa)
+    if alpha > 0 or kappa > 0:
+        homo_cap = seed_homogenous_balance_sheets(net, alpha, kappa)
+    return net
+
+
+def directed_barabasi_albert(n, m, d=0.5, io=0.05, alpha=0, kappa=0):
+    """
+    Scale-free graph with n nodes. During preferential attachment, new node is
+    connected to m existing nodes. With probability d the added edge goes from
+    new node to existing node (in-edge for existing node). With probability io
+    new node is connected to existing node both ways. Due to this the number
+    of edges will vary between networks.
+
+    Average Degree: <k> = m
+    Gamma Exponent in powerlaw: gamma = 3
+    """
+    if m < 1 or m >= n:
+        raise ValueError(f"For barabasi albert network m >= 1 and m < n not m = {m}, n = {n}")
+    net = complete(m + 1)
+    # store nodes their in-deg + out-deg number of times
+    node_selector = [b for b in net.banks for _ in range(net.in_deg_of(b) + net.out_deg_of(b))]
+    n_curr = m + 1
+    while n_curr < n:
+        b = Bank()
+        net.add_bank(b)
+        n_curr += 1
+        connect_to = random_subset(node_selector, m)
+        for ctb in connect_to:
+            r = random.random()
+            if r < io:
+                net.add_or_update_link(b, ctb)
+                net.add_or_update_link(ctb, b)
+                node_selector.extend([b, ctb] * 2)
+            elif r < d:
+                net.add_or_update_link(b, ctb)
+                node_selector.extend([b, ctb])
+            else:
+                net.add_or_update_link(ctb, b)
+                node_selector.extend([b, ctb])
+    if alpha > 0 or kappa > 0:
+        homo_cap = seed_homogenous_balance_sheets(net, alpha, kappa)
+    return net
+
+
+def chung_lu(n, z, gamma=3, alpha=0, kappa=0):
+    net = Network()
+    banks_numbered, bank_numbers = {}, np.arange(1, n + 1)
+    for i in range(1, n + 1):
+        b = Bank()
+        net.add_bank(b)
+        banks_numbered[i] = b
+    p = 1 / (gamma - 1)
+    ws = bank_numbers ** (- p) # np.array([i ** (- p) for i in bank_numbers])
+    wsum = np.sum(ws)
+    probs = ws / wsum
+    links = np.random.choice(bank_numbers, size=int(2*n*z), p=probs).reshape(-1, 2)
+    for u, v in links:
+        bu, bv = banks_numbered[u], banks_numbered[v]
+        while net.is_suc(bu, bv) or u == v:
+            # print(".", end="")
+            v = (v % n) + 1
+            bv = banks_numbered[v]
+        net.add_or_update_link(bu, bv, update_balance_sheets=False)
+    # while net.number_of_links < z * n:
+    #     u, v = np.random.choice(bank_numbers, size=2, replace=False, p=probs)
+    #     bu, bv = banks_numbered[u], banks_numbered[v]
+    #     net.add_or_update_link(bu, bv, update_balance_sheets=False)
+    if alpha > 0 or kappa > 0:
+        homo_cap = seed_homogenous_balance_sheets(net, alpha, kappa)
+    return net
+
+
+def fast_chung_lu(n, d, gamma=3, alpha=0, kappa=0):
+    """
+    [1] Miller, Joel C., and Aric Hagberg. Springer (2011)
+    [2] Fasino, D., Tonetto, A., & Tudisco, F. arXiv:1910.11341 (2019)
+    """
+    net = Network()
+    banks_numbered, bank_numbers = {}, range(n)
+    for i in range(n):
+        b = Bank()
+        net.add_bank(b)
+        banks_numbered[i] = b
+    if gamma <= 2:
+        raise ValueError(f"gamma must be > 2, not {gamma}!")
+    if d <= 2:
+        raise ValueError(f"d must be > 2, not {d}!")
+    # construct weight list [2]
+    m = math.sqrt((d * n) / 2)
+    p = 1 / (gamma - 1)
+    c = (1 - p) * d * (n ** p)
+    i0 = (c / m) ** (1 / p) - 1
+    ws = [c / ((i + i0) ** p) for i in range(n)] # decreasing order
+    wsum = sum(ws)
+    # create chung-lu graph [1]
+    for u in range(n):
+        v = 0
+        if v == u: # no self-loops
+            v += 1
+        p_cl = min(ws[u] * ws[v] / wsum, 1)
+        while v < n and p_cl > 0:
+            if p_cl != 1:
+                r1 = random.random()
+                logr, logp = math.log(r1), math.log(1 - p_cl)
+                v = v + int(logr / logp)
+            if v == u:
+                v += 1
+            if v < n:
+                r2 = random.random()
+                q_cl = min(ws[u] * ws[v] / wsum, 1)
+                if r2 < q_cl / p_cl: # add edge (u, v)
+                    bu, bv = banks_numbered[u], banks_numbered[v]
+                    net.add_or_update_link(bu, bv, update_balance_sheets=False)
+                p_cl = q_cl
+                v += 1
+    if alpha > 0 or kappa > 0:
+        homo_cap = seed_homogenous_balance_sheets(net, alpha, kappa)
     return net
 
 
