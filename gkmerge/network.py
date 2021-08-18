@@ -211,7 +211,7 @@ class Network():
         b.aggregate_shock()
         return b
 
-    def cascade(self, init_shock_bank, mode="simultaneous"):
+    def cascade(self, init_shock_bank, mode="simultaneous", recovery_rate=0):
         """
         Calculate default cascade upon initial shock of bank init_shock_bank.
         Update mode specifies order of bank updates:
@@ -221,13 +221,13 @@ class Network():
         """
         if mode ==  "simultaneous":
             self.simultaneous_cascade_steps = 0
-            self._simultaneous_cascade()
+            self._simultaneous_cascade(recovery_rate)
         elif mode == "sequential":
-            self._sequential_cascade(init_shock_bank)
+            self._sequential_cascade(init_shock_bank, recovery_rate)
         else:
             raise ValueError(f"Update mode '{mode}' is unknown!")
         
-    def _simultaneous_cascade(self):
+    def _simultaneous_cascade(self, recovery_rate):
         something_changed = True
         steps = 0
         while(something_changed):
@@ -236,8 +236,9 @@ class Network():
                 # NOTE: if order of statements in "or" is changed, update_state
                 # will not evaluate once something_changed is True
                 something_changed = (
-                    b.update_state(self.sucs_of(b, weight=True), mode="simultaneous") or 
-                    something_changed
+                    b.update_state(
+                        self.sucs_of(b, weight=True), recovery_rate, mode="simultaneous"
+                    ) or something_changed
                 )
             if something_changed:
                 for b in self.banks:
@@ -249,7 +250,7 @@ class Network():
                 steps += 1
         self.simultaneous_cascade_steps = steps
 
-    def _sequential_cascade(self, init_shock_bank):
+    def _sequential_cascade(self, init_shock_bank, recovery_rate):
         """
         Default cascade with sequential update mode.
         """
@@ -261,7 +262,7 @@ class Network():
         while(stack):
             b = stack.pop()
             on_stack[b] = False
-            if b.update_state(self.sucs_of(b, weight=True), mode="sequential"):
+            if b.update_state(self.sucs_of(b, weight=True), recovery_rate, mode="sequential"):
                 for suc in self.sucs_of(b):
                     if not suc.defaulted and not on_stack[suc]:
                         stack.append(suc)

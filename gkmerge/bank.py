@@ -57,7 +57,7 @@ class Bank():
     def aggregate_shock(self):
         self.balance_sheet["shock"] = self.balance_sheet["assets_e"]
 
-    def update_state(self, sucs_weighted, mode="simultaneous"):
+    def update_state(self, sucs_weighted, recovery_rate, mode="simultaneous"):
         """
         Update banks state if required and propagate corresponding shock to successors.
         """
@@ -69,14 +69,14 @@ class Bank():
             return False
         # bank insolvent, update it and its successors
         if mode == "simultaneous":
-            self._simultaneous_update(sucs_weighted)
+            self._simultaneous_update(sucs_weighted, recovery_rate)
         elif mode == "sequential":
-            self._sequential_update(sucs_weighted)
+            self._sequential_update(sucs_weighted, recovery_rate)
         else:
             raise ValueError(f"Update mode '{mode}' is unknown!")
         return True
 
-    def _simultaneous_update(self, sucs_weighted):
+    def _simultaneous_update(self, sucs_weighted, recovery_rate):
         """
         Update insolvent bank in simultaneous update mode.
         Banks get updated in waves, therefore we set temp_states first and
@@ -89,18 +89,21 @@ class Bank():
             temp_bs_set = bool(suc.temp_balance_sheet is not None)
             if not suc.is_solvent():
                 continue
+            # FIXME: If shock transmission depends on outstanding loss after default,
+            # this if-clause should be removed! 
             if temp_bs_set and not suc.is_solvent(temp=True):
                 continue
             # suc is solvent and either got no temp_bs or a solvent temp_bs
             # init temp_balance sheet if not yet set
             if not temp_bs_set:
                 suc.temp_balance_sheet = dict(suc.balance_sheet)
-            suc.temp_balance_sheet["shock"] += lend # transmit shock
+            # transmit shock
+            suc.temp_balance_sheet["shock"] += lend * (1 - recovery_rate)
             if not suc.is_solvent(temp=True):
                 # r_val changed if self responsible for default of suc
                 self.r_val += 1
 
-    def _sequential_update(self, sucs_weighted):
+    def _sequential_update(self, sucs_weighted, recovery_rate):
         """
         Update insolvent bank in sequential update mode.
         Directly set state and balance sheet. Banks are updated in arbitrary order
@@ -109,9 +112,18 @@ class Bank():
         for suc, lend in sucs_weighted:
             if not suc.is_solvent():
                 continue
-            suc.balance_sheet["shock"] += lend
+            suc.balance_sheet["shock"] += lend * (1 - recovery_rate)
             if not suc.is_solvent():
                 self.r_val += 1
+    
+    # def _non_zero_recovery(self, lend): # FIXME: ?
+    #     # TODO: DEBUG CHECK
+    #     if self.capital() > 0:
+    #         print("something is wrong")
+    #     asset_shortfall = abs(self.capital())
+    #     bankruptcy_costs = self.balance_sheet["liabilities_ib"] / 2
+    #     liability_share = lend / self.balance_sheet["liabilities_ib"]
+    #     return min((asset_shortfall + bankruptcy_costs) * liability_share, lend)
     
     # def __eq__(self, o: object) -> bool:
     #     pass
