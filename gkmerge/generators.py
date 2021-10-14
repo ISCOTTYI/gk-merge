@@ -22,79 +22,12 @@ __all__ = [
 ]
 
 
-# TODO: NEEDS REWORKING: common asset not implemented
-def seed_homogenous_balance_sheets(network, alpha, kappa):
-    """
-    For a given list of banks, initialize the balance sheets. Assets are
-    distributed evenly over incoming links. alpha is fraction of interbank assets
-    on total assets, kappa is fraction of capital
-    """
-    if not 0 <= alpha <= 1 or not 0 <= kappa <= 1:
-        raise ValueError("alpha and kappa must be between 0 and 1")
-    assets_tot = 100
-    homog_cap = assets_tot * kappa
-    net = network
-    for b in net.banks:
-        in_deg = net.in_deg_of(b)
-        if in_deg > 0:
-            assets_ib = assets_tot * alpha
-            assets_ib_per_pre = assets_ib / in_deg
-            b.balance_sheet["assets_ib"] = assets_ib
-            b.balance_sheet["assets_e"] = assets_tot - assets_ib
-        else:
-            assets_ib_per_pre = 0
-            b.balance_sheet["assets_ib"] = 0
-            b.balance_sheet["assets_e"] = assets_tot
-        for pre in net.pres_of(b):
-            net.add_or_update_link(pre, b, weight=assets_ib_per_pre, update_balance_sheets=False)
-    for b in net.banks:
-        liabilities_ib = sum([suc_weight[1] for suc_weight in net.sucs_of(b, weight=True)])
-        b.balance_sheet["liabilities_ib"] = liabilities_ib
-        b.balance_sheet["liabilities_e"] = assets_tot - liabilities_ib - homog_cap
-    return homog_cap
-
-
-# TODO: NEEDS REWORKING: common asset not implemented
-def alternative_balance_sheet_seeder(network, alpha, kappa):
-    if not 0 <= alpha <= 1 or not 0 <= kappa <= 1:
-        raise ValueError("alpha and kappa must be between 0 and 1")
-    for b in network.banks:
-        # in_deg, out_deg = network.in_deg_of(b), network.out_deg_of(b)
-        for pre in network.pres_of(b):
-            network.add_or_update_link(pre, b, weight=1)
-        # a_ib = b.balance_sheet["assets_ib"]
-        # a_tot = a_ib / alpha
-        # b.balance_sheet["assets_e"] = a_tot - a_ib
-    for b in network.banks:
-        a_ib = b.balance_sheet["assets_ib"] #
-        l_ib = b.balance_sheet["liabilities_ib"]
-        #
-        a_tot = max(l_ib / alpha, a_ib / alpha)
-        b.balance_sheet["assets_e"] = a_tot - a_ib
-        #
-        # a_tot = b.balance_sheet["assets_ib"] + b.balance_sheet["assets_e"]
-        if a_tot == 0:
-            a_tot = l_ib + l_ib * kappa + 1 # to be tested
-            b.balance_sheet["assets_e"] = a_tot
-        k = a_tot * kappa
-        l_e = a_tot - l_ib - k
-        # while l_e < 0:
-        #     b.balance_sheet["assets_e"] += 1
-        #     l_e += 1
-        b.balance_sheet["liabilities_e"] = l_e
-
-
-def balance_sheet_seeder_by_deg(network, alpha, kappa, c):
+def init_balance_sheets(network, alpha, kappa, c):
     for b in network.banks:
         in_deg = network.in_deg_of(b)
         out_deg = network.out_deg_of(b)
         if in_deg + out_deg > 0:
             a_tot = (in_deg + out_deg + max(out_deg - in_deg, 0)) * 100 / 2 # linear relation
-            # for suc in network.sucs_of(b):
-            #     suc_in_deg = network.in_deg_of(suc)
-            #     suc_out_deg = network.out_deg_of(suc)
-            #     if suc_in_deg < 1.3 * suc_out_deg: # if true => large interbank liability for b
-            #         a_tot += suc_out_deg * 10 # sucs out degree heavily influences link weights
             a_ib = a_tot * alpha if in_deg > 0 else 0
             a_ib_per_pre = a_ib / in_deg if in_deg > 0 else 0
         else:
@@ -132,11 +65,11 @@ def complete(n, alpha=0, kappa=0, c=0):
         # balance_sheets all 0 and weights all 0 too -> no need to update balance_sheets
         net.add_or_update_link(u, v, update_balance_sheets=False)
     if alpha > 0 or kappa > 0:
-        homo_cap = balance_sheet_seeder_by_deg(net, alpha, kappa, c)
+        init_balance_sheets(net, alpha, kappa, c)
     return net
 
 
-def circular(n, alpha=0, kappa=0):
+def circular(n, alpha=0, kappa=0, c=0):
     net = unlinked(n)
     banks_lst = list(net.banks)
     for i in range(n):
@@ -144,17 +77,17 @@ def circular(n, alpha=0, kappa=0):
         v = banks_lst[(i + 1) % n]
         net.add_or_update_link(u, v, update_balance_sheets=False)
     if alpha > 0 or kappa > 0:
-        homo_cap = seed_homogenous_balance_sheets(net, alpha, kappa)
+        init_balance_sheets(net, alpha, kappa, c)
     return net
 
 
-def erdos_renyi(n, p, alpha=0, kappa=0):
+def erdos_renyi(n, p, alpha=0, kappa=0, c=0):
     net = unlinked(n)
     for u, v in permutations(net.banks, 2):
         if random.random() < p:
             net.add_or_update_link(u, v, update_balance_sheets=False)
     if alpha > 0 or kappa > 0:
-        homo_cap = seed_homogenous_balance_sheets(net, alpha, kappa)
+        init_balance_sheets(net, alpha, kappa, c)
     return net
 
 
@@ -172,7 +105,7 @@ def fast_erdos_renyi(n, p, alpha=0, kappa=0, c=0):
     if p >= 1:
         raise ValueError("p must be smaller than 1! Generate complete graph instead.")
     if p <= 0:
-        homo_cap = seed_homogenous_balance_sheets(net, alpha, kappa)
+        init_balance_sheets(net, alpha, kappa, c)
         return net
     u, v, logp = 0, -1, math.log(1.0 - p)
     while u < n:
@@ -189,13 +122,11 @@ def fast_erdos_renyi(n, p, alpha=0, kappa=0, c=0):
             bu, bv = banks_numbered[u], banks_numbered[v]
             net.add_or_update_link(bu, bv, update_balance_sheets=False)
     if alpha > 0 or kappa > 0:
-        # homo_cap = seed_homogenous_balance_sheets(net, alpha, kappa)
-        # alternative_balance_sheet_seeder(net, alpha, kappa) # TODO: TESTING!
-        balance_sheet_seeder_by_deg(net, alpha, kappa, c)
+        init_balance_sheets(net, alpha, kappa, c)
     return net
 
 
-def directed_barabasi_albert(n, m, d=0.5, io=0.05, alpha=0, kappa=0):
+def directed_barabasi_albert(n, m, d=0.5, io=0.05, alpha=0, kappa=0, c=0):
     """
     Scale-free graph with n nodes. During preferential attachment, new node is
     connected to m existing nodes. With probability d the added edge goes from
@@ -230,7 +161,7 @@ def directed_barabasi_albert(n, m, d=0.5, io=0.05, alpha=0, kappa=0):
                 net.add_or_update_link(ctb, b)
                 node_selector.extend([b, ctb])
     if alpha > 0 or kappa > 0:
-        homo_cap = seed_homogenous_balance_sheets(net, alpha, kappa)
+        init_balance_sheets(net, alpha, kappa, c)
     return net
 
 
@@ -258,9 +189,7 @@ def chung_lu(n, z, gamma=3, alpha=0, kappa=0, c=0):
     #     bu, bv = banks_numbered[u], banks_numbered[v]
     #     net.add_or_update_link(bu, bv, update_balance_sheets=False)
     if alpha > 0 or kappa > 0:
-        # homo_cap = seed_homogenous_balance_sheets(net, alpha, kappa)
-        # alternative_balance_sheet_seeder(net, alpha, kappa) # TODO: TESTING
-        balance_sheet_seeder_by_deg(net, alpha, kappa, c)
+        init_balance_sheets(net, alpha, kappa, c)
     return net
 
 
@@ -309,11 +238,11 @@ def fast_chung_lu(n, d, gamma=3, alpha=0, kappa=0, c=0):
                 v += 1
     if alpha > 0 or kappa > 0:
         # homo_cap = seed_homogenous_balance_sheets(net, alpha, kappa)
-        balance_sheet_seeder_by_deg(net, alpha, kappa, c)
+        init_balance_sheets(net, alpha, kappa, c)
     return net
 
 
-def from_unique_id_link_list(n, links, alpha, kappa):
+def from_unique_id_link_list(n, links, alpha=0, kappa=0, c=0):
     """
     Create network from list of links with unique bank ids and no gaps in ids.
     Example: [[1, 2], [3, 1]]
@@ -328,7 +257,7 @@ def from_unique_id_link_list(n, links, alpha, kappa):
         u = banks_by_id[link[0]]
         v = banks_by_id[link[1]]
         net.add_or_update_link(u, v, update_balance_sheets=False)
-    homo_cap = seed_homogenous_balance_sheets(net, alpha, kappa)
+    init_balance_sheets(net, alpha, kappa, c)
     return net
 
 

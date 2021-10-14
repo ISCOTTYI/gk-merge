@@ -1,5 +1,4 @@
 import logging
-import numpy as np
 from collections import deque, Counter
 from randomdict import RandomDict
 # from itertools import islice
@@ -25,6 +24,10 @@ class Network():
         self.simultaneous_cascade_steps = None
         self.merge_round = 0
         self._shmp_pairs = None
+        self.df_over_time = []
+        self.init_system_assets = 0
+        self.defaulted_system_assets = 0
+        self.system_assets_over_time = []
 
     @property
     def number_of_banks(self):
@@ -180,7 +183,7 @@ class Network():
     
     def get_largest(self):
         # if all banks are equal size returns the first in iterator
-        return max(self.banks, key=lambda b: b.size)
+        return max(self.banks, key=lambda b: b.merge_state)
     
     def get_highest_in_deg(self):
         return max(self.banks, key=lambda b: self.in_deg_of(b))
@@ -210,8 +213,16 @@ class Network():
         b = self.banks_by_id[id_]
         b.aggregate_shock()
         return b
+    
+    def shock_max_in_deg(self):
+        b = self.get_highest_in_deg()
+        b.aggregate_shock()
+        return b
 
-    def cascade(self, init_shock_bank, mode="simultaneous", recovery_rate=0):
+    def cascade(
+        self, init_shock_bank, mode="simultaneous",
+        recovery_rate=0, deprecation_factor=0, record_profiles=False
+    ):
         """
         Calculate default cascade upon initial shock of bank init_shock_bank.
         Update mode specifies order of bank updates:
@@ -221,39 +232,58 @@ class Network():
         """
         if mode ==  "simultaneous":
             self.simultaneous_cascade_steps = 0
-            self._simultaneous_cascade(recovery_rate)
+            self._simultaneous_cascade(recovery_rate, deprecation_factor, record_profiles)
         elif mode == "sequential":
-            self._sequential_cascade(init_shock_bank, recovery_rate)
+            self._sequential_cascade(
+                init_shock_bank, recovery_rate, deprecation_factor, record_profiles
+            )
         else:
             raise ValueError(f"Update mode '{mode}' is unknown!")
         
-    def _simultaneous_cascade(self, recovery_rate):
+    def _simultaneous_cascade(self, recovery_rate, deprecation_factor, record_profiles):
         something_changed = True
         steps = 0
+        if record_profiles:
+            self.system_assets_over_time.append(self.init_system_assets)
         while(something_changed):
             something_changed = False
+            newly_defaulted = 0
             for b in self.banks:
                 # NOTE: if order of statements in "or" is changed, update_state
                 # will not evaluate once something_changed is True
-                something_changed = (
-                    b.update_state(
-                        self.sucs_of(b, weight=True), recovery_rate, mode="simultaneous"
-                    ) or something_changed
+                b_changed = b.update_state(
+                    self.sucs_of(b, weight=True), recovery_rate, mode="simultaneous"
                 )
+                something_changed = (b_changed or something_changed)
+                if b_changed:
+                    newly_defaulted += 1
+                    self.defaulted_system_assets += b.assets_tot()
             if something_changed:
                 for b in self.banks:
+                    # perform external shock to temp_balance_sheets
+                    if deprecation_factor > 0:
+                        b.asset_com_shock(
+                            deprecation_factor, multiplicity=newly_defaulted, temp=True
+                        )
+                    # apply changes
                     if b.temp_defaulted is not None:
                         b.defaulted = b.temp_defaulted
                     if b.temp_balance_sheet is not None:
                         b.balance_sheet = b.temp_balance_sheet
                     b.reset_temps()
                 steps += 1
+                if record_profiles:
+                    curr_system_assets = self.init_system_assets - self.defaulted_system_assets
+                    self.system_assets_over_time.append(curr_system_assets)
+                    self.df_over_time.append(self.defaulted_fraction())
         self.simultaneous_cascade_steps = steps
 
-    def _sequential_cascade(self, init_shock_bank, recovery_rate):
+    def _sequential_cascade(self, init_shock_bank, recovery_rate, deprecation_factor, record_profiles):
         """
         Default cascade with sequential update mode.
         """
+        if deprecation_factor > 0:
+            raise NotImplementedError()
         stack = deque()
         on_stack = {b: False for b in self.banks}
         # Init stack
@@ -274,7 +304,11 @@ class Network():
             b.reset_temps()
             b.r_val = 0
             b.balance_sheet["shock"] = 0
-        self.simultaneous_cascade_steps = 0
+            b.balance_sheet["shock_e"] = 0
+        self.simultaneous_cascade_steps = None
+        self.defaulted_system_assets = 0
+        self.system_assets_over_time = []
+        self.df_over_time = []
 
     def merge(self, acquiring, acquired):
         """
@@ -283,12 +317,16 @@ class Network():
         """
         if acquiring == acquired:
             raise ValueError("Bank can not acquire itself!")
+        # remember total assets of merging banks
+        a_tot = acquiring.assets_tot() + acquired.assets_tot()
         # external balance sheet quantities are simply added
         ing_bs, ed_bs = acquiring.balance_sheet, acquired.balance_sheet
         ing_bs["assets_e"] += ed_bs["assets_e"]
+        ing_bs["assets_com"] += ed_bs["assets_com"]
         ing_bs["liabilities_e"] += ed_bs["liabilities_e"]
         ing_bs["shock"] += ed_bs["shock"]
-        ing_bs["provision"] += ed_bs["provision"]
+        ing_bs["shock_e"] += ed_bs["shock_e"]
+        # ing_bs["provision"] += ed_bs["provision"]
         # handle interbank links
         for suc, w in self.sucs_of(acquired, weight=True):
             # TODO: maybe use try catch instead as add_link checks for selfloops
@@ -305,20 +343,23 @@ class Network():
             if self.is_pre(acquiring, pre):
                 new_w += self.get_link_weight(pre, acquiring)
             self.add_or_update_link(pre, acquiring, weight=new_w)
+        acquiring.merge_state += acquired.merge_state + 1
         self.remove_bank(acquired)
+        # correct total system assets
+        self.init_system_assets -= a_tot - acquiring.assets_tot()
         self.merge_round += 1
 
-    def random_merge(self, rule):
+    def random_merge(self, rule, **kwargs):
         """
         Merge rules for random are:
             - "random": Fully randomly select merge parties
             - "vertical": Largest bank acquires randomly selected smaller bank
             - "semihorizontal": Only small banks may merge
         """
-        acquiring, acquired = self._sample_banks_for_merge(rule)
+        acquiring, acquired = self._sample_banks_for_merge(rule, **kwargs)
         self.merge(acquiring, acquired)
     
-    def _sample_banks_for_merge(self, rule):
+    def _sample_banks_for_merge(self, rule, **kwargs):
         """
         Returns a tuple of banks.
         """
@@ -326,7 +367,10 @@ class Network():
             b, d = sample_unique_pair(self.banks)
             return b, d
         if rule == "vertical":
-            lb = self.get_largest()
+            if "aquiring_bank" in kwargs:
+                lb = kwargs["aquiring_bank"]
+            else:
+                lb = self.get_largest()
             b = sample_except(self.banks, lb)
             return lb, b # when passed to merge lb is acquiring
         if rule == "semihorizontal":
@@ -335,12 +379,16 @@ class Network():
             if len(self._shmp_pairs) == 0:
                 raise ValueError("Can only perform semihorizontal if there are unmerged banks!")
             b, d = self._shmp_pairs.pop()
-            return b, d            
+            return b, d
         raise ValueError(f"Unknown merge rule {rule}!")
 
     def defaulted_fraction(self):
         c = Counter((b.defaulted for b in self.banks))
         return c[True] / self.number_of_banks
+    
+    def defaulted_asset_fraction(self):
+        ia = self.init_system_assets
+        return self.defaulted_system_assets / ia if ia > 0 else 0
     
     def z(self):
         """
@@ -357,6 +405,12 @@ class Network():
         out_deg_gen = (self.out_deg_of(b) for b in self.banks)
         c = Counter(out_deg_gen)
         return list(c.keys()), list(c.values())
+    
+    def merge_state_distr(self):
+        ms_gen = (b.merge_state for b in self.banks)
+        c = Counter(ms_gen)
+        return c
+        # return list(c.keys()), list(c.values())
     
     # def __str__(self) -> str:
     #     pass

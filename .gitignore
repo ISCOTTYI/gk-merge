@@ -1,6 +1,7 @@
 main.py
 _experiments.py
 .DS_Store
+notebooks/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
