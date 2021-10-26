@@ -4,6 +4,7 @@ from randomdict import RandomDict
 # from itertools import islice
 from typing import OrderedDict
 from gkmerge.bank import Bank
+from gkmerge.asset import Asset
 from gkmerge.util import sample_unique_pair, sample_except, random_pairs
 
 logger = logging.getLogger(__name__)
@@ -20,6 +21,11 @@ class Network():
         self.number_of_links = 0
         self._pres = {} # stores {bank: {pre_of_bank: weight, ...}, ...}
         self._sucs = {} # stores {bank: {suc_of_bank: weight, ...}, ...}
+        
+        self.ext_assets = RandomDict() # stores {asset: price} ???
+        self.number_of_investments = 0
+        self._bank_invest = {} # stores {bank: {ext_a: investment}, ...}, ...}
+        self._asset_invest = {} # stores {ext_a: {bank: investment}, ...}, ...}
 
         self.simultaneous_cascade_steps = None
         self.merge_round = 0
@@ -73,6 +79,7 @@ class Network():
         self.banks[bank] = bank
         self._sucs[bank] = {}
         self._pres[bank] = {}
+        self._bank_invest[bank] = {}
 
     def add_banks_from(self, banks):
         for b in banks:
@@ -97,6 +104,25 @@ class Network():
     def remove_banks_from(self, banks):
         for b in banks:
             self.remove_bank(b)
+    
+    def add_ext_asset(self, asset):
+        if not isinstance(asset, Asset):
+            raise TypeError(f"Can only add Assets, not type {type(asset)}")
+        if asset in self.ext_assets:
+            raise ValueError(f"Asset with id {asset.id_} is already in network!")
+        self.ext_assets[asset] = asset # ???
+        self._asset_invest[asset] = {}
+    
+    def remove_ext_asset(self, asset, update_balance_sheets=True):
+        try:
+            del self.ext_assets[asset]
+        except KeyError:
+            raise ValueError(f"Asset with id {asset.id_} is not in network!")
+        for b, inv in self._asset_invest[asset]:
+            if update_balance_sheets:
+                b.balance_sheet["assets_com"] -= inv
+            del self._bank_invest[b][asset]
+        del self._asset_invest[asset]
 
     def add_or_update_link(self, u, v, weight=0, update_balance_sheets=True):
         """
@@ -140,6 +166,22 @@ class Network():
             return self._sucs[u][v]
         except KeyError:
             raise ValueError(f"Link ({u.id_}, {v.id_}) is not in network!")
+    
+    def add_or_update_investment(self, bank, asset, investment=0, update_balance_sheets=True):
+        try:
+            b_inv = self._bank_invest[bank]
+            a_inv = self._asset_invest[asset]
+            if update_balance_sheets:
+                curr_inv = 0
+                if asset in self._bank_invest[bank]:
+                    curr_inv = self._bank_invest[bank][asset]
+                bank.balance_sheet["assets_com"] += investment - curr_inv
+            if not asset in b_inv:
+                self.number_of_investments += 1
+            b_inv[asset] = investment
+            a_inv[bank] = investment
+        except KeyError:
+            raise ValueError(f"Asset with id {asset.id_} or bank with id {bank.id_} not in network!")
 
     def sucs_of(self, bank, weight=False):
         try:
@@ -154,6 +196,14 @@ class Network():
             if weight:
                 return self._pres[bank].items()
             return self._pres[bank].keys()
+        except KeyError:
+            raise ValueError(f"Bank with id {bank.id_} is not in network!")
+    
+    def invs_of(self, bank, weight=False):
+        try:
+            if weight:
+                return self._bank_invest[bank].items()
+            return self._bank_invest[bank].keys()
         except KeyError:
             raise ValueError(f"Bank with id {bank.id_} is not in network!")
         
@@ -181,6 +231,23 @@ class Network():
         except KeyError:
             raise ValueError(f"Bank with id {bank.id_} is not in network!")
     
+    def inv_deg_of(self, bank):
+        try:
+            return len(self._bank_invest[bank])
+        except KeyError:
+            raise ValueError(f"Bank with id {bank.id_} is not in network!")
+    
+    def liquidated_fraction(self, asset):
+        try:
+            tc, lc = 0, 0
+            for b, w in self._asset_invest[asset].items():
+                if b.defaulted:
+                    lc += w
+                tc += w
+            return lc / tc
+        except KeyError:
+            raise ValueError(f"Asset with id {asset.id_} is not in network!")
+
     def get_largest(self):
         # if all banks are equal size returns the first in iterator
         return max(self.banks, key=lambda b: b.merge_state)
@@ -218,6 +285,17 @@ class Network():
         b = self.get_highest_in_deg()
         b.aggregate_shock()
         return b
+
+    def shock_random_asset(self, phi_new):
+        a = self.ext_assets.random_key()
+        phi_curr = a.phi
+        a.phi = phi_new
+        for b, w in self._asset_invest[a].items():
+            if not b.shocking_required():
+                continue
+            new_shock = w * phi_curr - w * phi_new
+            b.balance_sheet["shock_e"] += new_shock
+        return a
 
     def cascade(
         self, init_shock_bank, mode="simultaneous",
@@ -309,6 +387,27 @@ class Network():
         self.defaulted_system_assets = 0
         self.system_assets_over_time = []
         self.df_over_time = []
+    
+    def icc_cascade(self, *args):
+        something_changed = True
+        while something_changed:
+            something_changed = False
+            for b in self.banks:
+                b_changed = not b.is_solvent() and not b.defaulted
+                something_changed = b_changed or something_changed
+                if b_changed:
+                    b.defaulted = True
+                    for a in self.invs_of(b):
+                        self._devaluate_asset(a)
+            
+    def _devaluate_asset(self, asset):
+        phi_curr = asset.phi
+        phi_new = asset.devaluate_exp(self.liquidated_fraction(asset)) # DEBUG
+        for b, w in self._asset_invest[asset].items():
+            if not b.shocking_required():
+                continue
+            new_shock = w * phi_curr - w * phi_new
+            b.balance_sheet["shock_e"] += new_shock
 
     def merge(self, acquiring, acquired):
         """
@@ -396,6 +495,12 @@ class Network():
         """
         return sum((self.out_deg_of(b) for b in self.banks)) / self.number_of_banks
     
+    def mu_b(self):
+        """
+        Mean investment-degree of network.
+        """
+        return sum((self.inv_deg_of(b) for b in self.banks)) / self.number_of_banks
+    
     def in_deg_distr(self):
         in_deg_gen = (self.in_deg_of(b) for b in self.banks)
         c = Counter(in_deg_gen)
@@ -404,6 +509,11 @@ class Network():
     def out_deg_distr(self):
         out_deg_gen = (self.out_deg_of(b) for b in self.banks)
         c = Counter(out_deg_gen)
+        return list(c.keys()), list(c.values())
+
+    def inv_deg_distr(self):
+        inv_deg_gen = (self.inv_deg_of(b) for b in self.banks)
+        c = Counter(inv_deg_gen)
         return list(c.keys()), list(c.values())
     
     def merge_state_distr(self):

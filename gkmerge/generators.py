@@ -7,6 +7,7 @@ from itertools import permutations
 from randomdict import RandomDict
 from gkmerge.network import Network
 from gkmerge.bank import Bank
+from gkmerge.asset import Asset
 from gkmerge.util import random_subset
 
 logger = logging.getLogger(__name__)
@@ -17,12 +18,16 @@ __all__ = [
     "circular",
     "erdos_renyi",
     "fast_erdos_renyi",
+    "bipartite_erdos_renyi",
+    "fast_bipartite_erdos_reyni",
     "chung_lu",
-    "from_unique_id_link_list"
+    "from_unique_id_link_list",
+    "init_balance_sheets_dcc",
+    "init_balance_sheets_icc"
 ]
 
 
-def init_balance_sheets(network, alpha, kappa, c):
+def init_balance_sheets_dcc(network, alpha, kappa, c):
     for b in network.banks:
         in_deg = network.in_deg_of(b)
         out_deg = network.out_deg_of(b)
@@ -48,6 +53,25 @@ def init_balance_sheets(network, alpha, kappa, c):
         b.balance_sheet["liabilities_e"] = a_tot - l_ib - k
 
 
+def init_balance_sheets_icc(network, alpha, kappa):
+    a_tot = 100
+    a_com = a_tot * alpha
+    c = a_tot - a_com # cash
+    k = a_tot * kappa
+    l = a_tot - k
+    for b in network.banks:
+        deg = network.inv_deg_of(b)
+        if deg > 0:
+            w = a_com / deg
+            b.balance_sheet["assets_e"] = c
+            for a in network.invs_of(b):
+                network.add_or_update_investment(b, a, investment=w) # sets a_com in balance sheets
+        else:
+            w = 0
+            b.balance_sheet["assets_e"] = a_tot
+        b.balance_sheet["liabilities_e"] = l
+
+
 def unlinked(n):
     """
     Create network with given number n of banks
@@ -65,7 +89,7 @@ def complete(n, alpha=0, kappa=0, c=0):
         # balance_sheets all 0 and weights all 0 too -> no need to update balance_sheets
         net.add_or_update_link(u, v, update_balance_sheets=False)
     if alpha > 0 or kappa > 0:
-        init_balance_sheets(net, alpha, kappa, c)
+        init_balance_sheets_dcc(net, alpha, kappa, c)
     return net
 
 
@@ -77,7 +101,7 @@ def circular(n, alpha=0, kappa=0, c=0):
         v = banks_lst[(i + 1) % n]
         net.add_or_update_link(u, v, update_balance_sheets=False)
     if alpha > 0 or kappa > 0:
-        init_balance_sheets(net, alpha, kappa, c)
+        init_balance_sheets_dcc(net, alpha, kappa, c)
     return net
 
 
@@ -87,7 +111,72 @@ def erdos_renyi(n, p, alpha=0, kappa=0, c=0):
         if random.random() < p:
             net.add_or_update_link(u, v, update_balance_sheets=False)
     if alpha > 0 or kappa > 0:
-        init_balance_sheets(net, alpha, kappa, c)
+        init_balance_sheets_dcc(net, alpha, kappa, c)
+    return net
+
+
+def bipartite_erdos_renyi(n, m, mu_b, alpha=0, kappa=0):
+    """
+    alpha is fraction of common external assets, kappa is capital fraction on total assets
+    """
+    net = Network()
+    bd, b_ids = {}, np.arange(n)
+    ad, a_ids = {}, np.arange(m)
+    for i in b_ids:
+        b = Bank()
+        net.add_bank(b)
+        bd[int(i)] = b
+    for i in a_ids:
+        a = Asset()
+        net.add_ext_asset(a)
+        ad[int(i)] = a
+    # https://stackoverflow.com/questions/1208118/using-numpy-to-build-an-array-of-all-combinations-of-two-arrays
+    comb = np.array(np.meshgrid(b_ids, a_ids)).T.reshape((n*m, 2))
+    # https://stackoverflow.com/questions/14262654/numpy-get-random-set-of-rows-from-2d-array
+    numb_of_invests = int(n * mu_b)
+    res = comb[np.random.choice(comb.shape[0], numb_of_invests, replace=False), :]
+    # np.random.shuffle(comb)
+    # res = comb[:n*mu_b]
+    for bid, aid in res:
+        net.add_or_update_investment(bd[bid], ad[aid], update_balance_sheets=False)
+    if alpha > 0 or kappa > 0:
+        init_balance_sheets_icc(net, alpha, kappa)
+    return net
+
+
+def fast_bipartite_erdos_renyi(n, m, mu_b, alpha=0, kappa=0):
+    """
+    V. Batagelj and Ulrik Brandes, "Efficient generation of large random networks",
+    Phys Rev E 71, (2005)
+    """
+    if n < m:
+        raise ValueError("Number of banks must be >= than number of external assets!")
+    net = Network()
+    assets_numbered, banks_numbered = {}, {}
+    for i in range(m):
+        b = Bank()
+        a = Asset()
+        net.add_bank(b)
+        net.add_ext_asset(a)
+        banks_numbered[i] = b
+        assets_numbered[i] = a
+    for i in range(m, n - m):
+        b = Bank()
+        net.add_bank(b)
+        banks_numbered[i] = b
+    p = mu_b / m
+    u, v, logp = 0, -1, math.log(1.0 - p)
+    while u < n:
+        logr = math.log(1.0 - random.random())
+        v = v + 1 + int(logr / logp)
+        while u < n and m <= v:
+            v = v - m
+            u = u + 1
+        if u < n:
+            bu, av = banks_numbered[u], assets_numbered[v]
+            net.add_or_update_investment(bu, av, update_balance_sheets=False)
+    if alpha > 0 or kappa > 0:
+        init_balance_sheets_icc(net, alpha, kappa)
     return net
 
 
@@ -105,7 +194,7 @@ def fast_erdos_renyi(n, p, alpha=0, kappa=0, c=0):
     if p >= 1:
         raise ValueError("p must be smaller than 1! Generate complete graph instead.")
     if p <= 0:
-        init_balance_sheets(net, alpha, kappa, c)
+        init_balance_sheets_dcc(net, alpha, kappa, c)
         return net
     u, v, logp = 0, -1, math.log(1.0 - p)
     while u < n:
@@ -122,7 +211,7 @@ def fast_erdos_renyi(n, p, alpha=0, kappa=0, c=0):
             bu, bv = banks_numbered[u], banks_numbered[v]
             net.add_or_update_link(bu, bv, update_balance_sheets=False)
     if alpha > 0 or kappa > 0:
-        init_balance_sheets(net, alpha, kappa, c)
+        init_balance_sheets_dcc(net, alpha, kappa, c)
     return net
 
 
@@ -161,7 +250,7 @@ def directed_barabasi_albert(n, m, d=0.5, io=0.05, alpha=0, kappa=0, c=0):
                 net.add_or_update_link(ctb, b)
                 node_selector.extend([b, ctb])
     if alpha > 0 or kappa > 0:
-        init_balance_sheets(net, alpha, kappa, c)
+        init_balance_sheets_dcc(net, alpha, kappa, c)
     return net
 
 
@@ -189,7 +278,7 @@ def chung_lu(n, z, gamma=3, alpha=0, kappa=0, c=0):
     #     bu, bv = banks_numbered[u], banks_numbered[v]
     #     net.add_or_update_link(bu, bv, update_balance_sheets=False)
     if alpha > 0 or kappa > 0:
-        init_balance_sheets(net, alpha, kappa, c)
+        init_balance_sheets_dcc(net, alpha, kappa, c)
     return net
 
 
@@ -238,7 +327,7 @@ def fast_chung_lu(n, d, gamma=3, alpha=0, kappa=0, c=0):
                 v += 1
     if alpha > 0 or kappa > 0:
         # homo_cap = seed_homogenous_balance_sheets(net, alpha, kappa)
-        init_balance_sheets(net, alpha, kappa, c)
+        init_balance_sheets_dcc(net, alpha, kappa, c)
     return net
 
 
@@ -257,7 +346,7 @@ def from_unique_id_link_list(n, links, alpha=0, kappa=0, c=0):
         u = banks_by_id[link[0]]
         v = banks_by_id[link[1]]
         net.add_or_update_link(u, v, update_balance_sheets=False)
-    init_balance_sheets(net, alpha, kappa, c)
+    init_balance_sheets_dcc(net, alpha, kappa, c)
     return net
 
 
