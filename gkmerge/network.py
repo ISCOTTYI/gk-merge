@@ -15,6 +15,26 @@ logger = logging.getLogger(__name__)
 #                   #
 #####################
 
+
+def print_infos(net, ad_mat=True, neib_info=False):
+    for b in net.banks:
+        print(f"{b.id_}\n  {b.balance_sheet}, K={b.capital()}")
+        if neib_info:
+            print(f"  Out neib: {[str(n[0].id_) + ': ' + str(n[1]) for n in net.sucs_of(b, weight=True)]}")
+            print(f"  In neib: {[str(n[0].id_) + ': ' + str(n[1]) for n in net.pres_of(b, weight=True)]}")
+
+
+def print_infos_icc(net):
+    print_infos(net, ad_mat=False)
+    print("\nBanks and their investments")
+    for b, ad in net._bank_invest.items():
+        print(f"{b.id_}: \n {[(a.id_, w) for a, w in ad.items()]}\n")
+    print("\nAssets and their investors")
+    for a, bd in net._asset_invest.items():
+        print(f"{a.id_}: {[b.id_ for b in bd]}")
+    print("\n")
+
+
 class Network():
     def __init__(self, input=None): # banks is dict-like and holds bank: bank
         self.banks = RandomDict()
@@ -31,9 +51,9 @@ class Network():
         self.merge_round = 0
         self._shmp_pairs = None
         self.df_over_time = []
-        self.init_system_assets = 0
-        self.defaulted_system_assets = 0
-        self.system_assets_over_time = []
+        self.init_system_assets = 0 # TODO: REFACTOR THIS NAME!!!
+        self.defaulted_system_assets = 0 # TODO: REFACTOR THIS NAME!!!
+        self.system_assets_over_time = [] # TODO: REFACTOR THIS NAME!!!
 
     @property
     def number_of_banks(self):
@@ -100,6 +120,9 @@ class Network():
                 suc.balance_sheet["assets_ib"] -= w
             del self._pres[suc][bank]
         del self._sucs[bank]
+        for a in self.invs_of(bank):
+            del self._asset_invest[a][bank]
+        del self._bank_invest[bank]
     
     def remove_banks_from(self, banks):
         for b in banks:
@@ -183,6 +206,12 @@ class Network():
         except KeyError:
             raise ValueError(f"Asset with id {asset.id_} or bank with id {bank.id_} not in network!")
 
+    def get_inv_weight(self, bank, asset):
+        try:
+            return self._bank_invest[bank][asset]
+        except KeyError:
+            raise ValueError(f"Asset with id {asset.id_} or bank with id {bank.id_} not in network!")
+
     def sucs_of(self, bank, weight=False):
         try:
             if weight:
@@ -218,6 +247,12 @@ class Network():
             return (pre in self._pres[bank])
         except KeyError:
             raise ValueError(f"Bank with id {bank.id_} is not in network!")
+
+    def is_inv(self, bank, asset):
+        try:
+            return (asset in self._bank_invest[bank])
+        except KeyError:
+            raise ValueError(f"Bank with id {bank.id_} is not in network!")
     
     def out_deg_of(self, bank):
         try:
@@ -236,6 +271,12 @@ class Network():
             return len(self._bank_invest[bank])
         except KeyError:
             raise ValueError(f"Bank with id {bank.id_} is not in network!")
+    
+    def asset_deg_of(self, asset):
+        try:
+            return len(self._asset_invest[asset])
+        except KeyError:
+            raise ValueError(f"Asset with id {asset.id_} is not in network!")
     
     def liquidated_fraction(self, asset):
         try:
@@ -288,12 +329,14 @@ class Network():
 
     def shock_random_asset(self, phi_new):
         a = self.ext_assets.random_key()
+        # print(f"Asset {a.id_} initially shocked!")
         phi_curr = a.phi
         a.phi = phi_new
         for b, w in self._asset_invest[a].items():
             if not b.shocking_required():
                 continue
             new_shock = w * phi_curr - w * phi_new
+            # print(f"bank {b.id_} got new shock {new_shock} due to initial asset shock")
             b.balance_sheet["shock_e"] += new_shock
         return a
 
@@ -324,6 +367,8 @@ class Network():
         if record_profiles:
             self.system_assets_over_time.append(self.init_system_assets)
         while(something_changed):
+            # ab = self.get_largest()
+            # print(ab.shock_tot())
             something_changed = False
             newly_defaulted = 0
             for b in self.banks:
@@ -383,31 +428,69 @@ class Network():
             b.r_val = 0
             b.balance_sheet["shock"] = 0
             b.balance_sheet["shock_e"] = 0
+        for a in self.ext_assets:
+            a.phi = 1
         self.simultaneous_cascade_steps = None
         self.defaulted_system_assets = 0
         self.system_assets_over_time = []
         self.df_over_time = []
     
-    def icc_cascade(self, *args):
+    def icc_cascade(self):
         something_changed = True
+        step = 0
+        self.system_assets_over_time.append(self.init_system_assets)
         while something_changed:
+            # ab = self.get_largest()
+            # print(ab.shock_tot())
+            # print("\n--- NEW ROUND ---\n")
+            # print_infos_icc(self)
             something_changed = False
+            step += 1
+            update_assets = set()
             for b in self.banks:
                 b_changed = not b.is_solvent() and not b.defaulted
                 something_changed = b_changed or something_changed
                 if b_changed:
+                    # print(f"{b.id_} defaulted")
                     b.defaulted = True
-                    for a in self.invs_of(b):
-                        self._devaluate_asset(a)
+                    update_assets.update(self.invs_of(b))
+                    self.defaulted_system_assets += b.assets_tot()
+            for a in update_assets:
+                self._devaluate_asset(a)
+            current_system_assets = self.init_system_assets - self.defaulted_system_assets
+            self.system_assets_over_time.append(current_system_assets)
+        self.simultaneous_cascade_steps = step
             
     def _devaluate_asset(self, asset):
         phi_curr = asset.phi
         phi_new = asset.devaluate_exp(self.liquidated_fraction(asset)) # DEBUG
+        # print(f"asset {asset.id_}: phi = {phi_curr} to {phi_new}, lf = {self.liquidated_fraction(asset)}")
         for b, w in self._asset_invest[asset].items():
             if not b.shocking_required():
                 continue
             new_shock = w * phi_curr - w * phi_new
+            # print(new_shock / b.assets_tot())
+            # print(f"  bank {b.id_} got new shock {new_shock}")
             b.balance_sheet["shock_e"] += new_shock
+
+    def icc_merge(self, acquiring, acquired):
+        if acquiring == acquired:
+            raise ValueError("Bank can not acquire itself!")
+        # external balance sheet quantities are added
+        ing_bs, ed_bs = acquiring.balance_sheet, acquired.balance_sheet
+        ing_bs["assets_e"] += ed_bs["assets_e"]
+        ing_bs["liabilities_e"] += ed_bs["liabilities_e"]
+        ing_bs["shock"] += ed_bs["shock"]
+        ing_bs["shock_e"] += ed_bs["shock_e"]
+        # handle external asset investments
+        for a, w in self.invs_of(acquired, weight=True):
+            new_w = w
+            if self.is_inv(acquiring, a):
+                new_w += self.get_inv_weight(acquiring, a)
+            self.add_or_update_investment(acquiring, a, investment=new_w)
+        acquiring.merge_state += acquired.merge_state + 1
+        self.remove_bank(acquired)
+        self.merge_round += 1
 
     def merge(self, acquiring, acquired):
         """
@@ -448,7 +531,7 @@ class Network():
         self.init_system_assets -= a_tot - acquiring.assets_tot()
         self.merge_round += 1
 
-    def random_merge(self, rule, **kwargs):
+    def random_merge(self, rule, icc=False, **kwargs):
         """
         Merge rules for random are:
             - "random": Fully randomly select merge parties
@@ -456,7 +539,10 @@ class Network():
             - "semihorizontal": Only small banks may merge
         """
         acquiring, acquired = self._sample_banks_for_merge(rule, **kwargs)
-        self.merge(acquiring, acquired)
+        if icc:
+            self.icc_merge(acquiring, acquired)
+        else:
+            self.merge(acquiring, acquired)
     
     def _sample_banks_for_merge(self, rule, **kwargs):
         """
@@ -500,6 +586,12 @@ class Network():
         Mean investment-degree of network.
         """
         return sum((self.inv_deg_of(b) for b in self.banks)) / self.number_of_banks
+    
+    def mu_a(self):
+        """
+        Mean asset-degree of network.
+        """
+        return sum((self.asset_deg_of(a) for a in self.ext_assets)) / len(self.ext_assets)
     
     def in_deg_distr(self):
         in_deg_gen = (self.in_deg_of(b) for b in self.banks)

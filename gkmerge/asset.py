@@ -25,12 +25,10 @@ class Asset():
     def devaluate_exp(self, liquidated_fraction):
         alpha = 1.0536
         f = math.exp((-alpha) * liquidated_fraction)
-        phi_new = self.phi * f
-        self.phi = phi_new
-        return phi_new
+        self.phi = f
+        return f
     
     def devaluate_debug(self, liquidated_fraction):
         f = liquidated_fraction
-        phi_new = self.phi * f
-        self.phi = phi_new
-        return phi_new
+        self.phi = f
+        return f

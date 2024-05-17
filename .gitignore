@@ -2,6 +2,8 @@ main.py
 _experiments.py
 .DS_Store
 notebooks/
+venv_oldMB/
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

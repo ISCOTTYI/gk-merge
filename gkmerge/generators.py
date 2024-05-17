@@ -19,7 +19,7 @@ __all__ = [
     "erdos_renyi",
     "fast_erdos_renyi",
     "bipartite_erdos_renyi",
-    "fast_bipartite_erdos_reyni",
+    "fast_bipartite_erdos_renyi",
     "chung_lu",
     "from_unique_id_link_list",
     "init_balance_sheets_dcc",
@@ -70,6 +70,7 @@ def init_balance_sheets_icc(network, alpha, kappa):
             w = 0
             b.balance_sheet["assets_e"] = a_tot
         b.balance_sheet["liabilities_e"] = l
+        network.init_system_assets += a_tot
 
 
 def unlinked(n):
@@ -149,22 +150,28 @@ def fast_bipartite_erdos_renyi(n, m, mu_b, alpha=0, kappa=0):
     V. Batagelj and Ulrik Brandes, "Efficient generation of large random networks",
     Phys Rev E 71, (2005)
     """
-    if n < m:
-        raise ValueError("Number of banks must be >= than number of external assets!")
     net = Network()
     assets_numbered, banks_numbered = {}, {}
-    for i in range(m):
+    for i in range(min(n, m)):
         b = Bank()
         a = Asset()
         net.add_bank(b)
         net.add_ext_asset(a)
         banks_numbered[i] = b
         assets_numbered[i] = a
-    for i in range(m, n - m):
-        b = Bank()
-        net.add_bank(b)
-        banks_numbered[i] = b
+    for i in range(min(n, m), max(n, m)):
+        if n > m:
+            b = Bank()
+            net.add_bank(b)
+            banks_numbered[i] = b
+        else:
+            a = Asset()
+            net.add_ext_asset(a)
+            assets_numbered[i] = a
     p = mu_b / m
+    if p <= 0:
+        init_balance_sheets_icc(net, alpha, kappa)
+        return net
     u, v, logp = 0, -1, math.log(1.0 - p)
     while u < n:
         logr = math.log(1.0 - random.random())

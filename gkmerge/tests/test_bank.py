@@ -39,7 +39,7 @@ class TestBank(unittest.TestCase):
 
     def test_idiosyncratic_shock(self):
         self.b.balance_sheet["assets_e"] = 10
-        self.b.idiosyncratic_shock()
+        self.b.aggregate_shock()
         self.assertEqual(self.b.balance_sheet["shock"], 10)
         self.assertEqual(self.b.balance_sheet["assets_e"], 10)
 
